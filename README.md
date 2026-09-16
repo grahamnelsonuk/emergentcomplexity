@@ -48,13 +48,23 @@ The page steps over d = 0 itself, where escape takes forever.
 | move the mouse | steer c.  Horizontal is the angle around the cardioid, vertical is the distance from its boundary |
 | click | dive toward that point.  Shift-click or right-click pulls back out |
 | drag | pan.  Wheel or pinch zooms toward the cursor |
+| click a mote | pluck it by hand |
 | space | bloom – a shockwave that rings every mote it reaches, in an arpeggio ordered by distance |
+| 1 – 7 | hold a drum cycle on, then off, then back under the control of flow |
 | W A S D / arrows | nudge c by hand |
 | R | return to the whole set |
 | Q / E | zoom out and in from the keyboard |
 | H | hide the panel |
 | M | mute |
 | G | hand it back to drift |
+
+Once you are flown in, the camera clings to the boundary: the set moves under
+the view as c changes, and without that you end up staring at dead space.  A
+short spiral search runs a few times a second and eases the view target back
+onto the nearest filament; if the structure has left the frame entirely, the
+zoom backs off until it is in reach again, rather than hanging in the void.
+The seed itself also slows down with depth, because a fast c whips the
+structure clean out of a tight frame.
 
 A click does not simply zoom at the cursor.  It looks for the nearest
 filament first – a golden-angle spiral search, falling back to an outward
@@ -77,15 +87,46 @@ Coherence accumulates through seven **epochs**, each of which changes the mode,
 the tonic, the palette, the reaction–diffusion regime, the orbit traps and the
 instrumentation:
 
-| | | | |
-|---|---|---|---|
-| I | Seed | aeolian | drone and pad |
-| II | Filament | dorian | the gliding lead wakes |
-| III | Cascade | lydian | bells fall out of the orbit |
-| IV | Lattice | phrygian dominant | sub-bass on the Cantor pulse |
-| V | Nova | whole tone | a Thue–Morse pulse joins |
-| VI | Aurora | pentatonic | shimmer across the high register |
-| VII | Singularity | octatonic | everything at once |
+| | | | | | |
+|---|---|---|---|---|---|
+| I | Seed | aeolian in A | 58 | – | a drone and a slow pad, no pulse yet |
+| II | Filament | dorian in G | 62 | 3 | the gliding lead wakes, a shaker in 3 |
+| III | Cascade | lydian in C | 67 | 3 5 | bells fall out of the orbit, toms in 5 across the 3 |
+| IV | Lattice | phrygian dominant in F | 72 | 3 5 7 27 | sub-bass, kick in 7, the Cantor set on the woodblock |
+| V | Nova | whole tone in B♭ | 78 | 3 5 7 11 27 n | a rim figure in 11, and the orbit's own period joins as a drum |
+| VI | Aurora | pentatonic in A♭ | 84 | 3 5 7 11 13 27 n | shimmer up high, a ride in 13 over everything |
+| VII | Singularity | octatonic in B | 90 | all | every cycle running at once |
+
+Each epoch also changes the tempo, the delay subdivision, the lead's waveform,
+the reverb depth, the palette, the reaction–diffusion regime, which orbit trap
+colours the picture, the frequency of the escape-time banding, and the size of
+the halo around the set.  The transition is a Shepard riser, so it sounds like
+a climb with no top.  The guide inside the page lists all of this, built from
+the same table the code runs on, so it cannot drift out of date.
+
+## The polyrhythm
+
+Seven cycles, each turning on its own length in sixteenth notes: 3, 5, 7, 11,
+13, 27, and one borrowed from the orbit.  They are co-prime, so they phase
+against each other and the whole web only comes back round on their least
+common multiple – 3·5·7·11·13·27 = **135,135 sixteenths**, a little over six
+hours at Singularity's tempo.  It does not repeat while you are listening.
+
+Two of the cycles are fractal in their own right.  The 27 carries the Cantor
+set: take away the middle third, twice, and play what is left, which is
+`[0 2 6 8 18 20 24 26]`.  The accents follow the Thue–Morse sequence, the
+parity of the number of ones in the step index's binary expansion.  And the
+last cycle is the orbit's own: when c sits inside a period-n bulb the orbit
+closes after n steps, and n becomes a drum, so the rhythm is the literal
+period of the point you are steering.  Period 1 – a fixed point – is not a
+rhythm, so it does not count, and an escaping orbit has no period at all.
+
+Layers arrive as flow rises and leave as it decays, so the groove accumulates
+while you are in it and thins when you stop.  Hits land a few milliseconds
+late with a little jitter and a velocity that follows the accent pattern,
+because a grid does not sound like a drummer.  The lattice at the bottom left
+is the live picture of it: one row per turning cycle, a lit dot for each onset,
+and a bright head where the pulse has reached.
 
 ## The music engine
 
@@ -96,10 +137,8 @@ Built on [Tone.js](https://tonejs.github.io/).  Nothing is sequenced by hand.
   legato: consecutive notes call `setNote` rather than re-attacking, and
   portamento scales with flow, so the line swoops instead of stepping.  Blooms
   and epoch changes add an exponential filter sweep over the top.
-* **Rhythm is fractal, not metrical.**  The bass and kick fall on the Cantor
-  set over 27 sixteenths (remove the middle third, twice), and the hats follow
-  the Thue–Morse sequence, the parity of the number of 1 bits in the step index.
-  Neither is a 4/4 pattern and neither repeats the way one sounds like it will.
+* **Rhythm is fractal and polyrhythmic**, never metrical.  See above.  The
+  bass line also falls on the Cantor set, pitched from the orbit.
 * **Epoch changes** play a Shepard riser: four octave-stacked oscillators
   sweeping two octaves under a bell-shaped gain, which reads as an endless rise.
 * A 512-bin FFT on the master bus feeds bass, mid and high energy back into the
@@ -138,11 +177,23 @@ require.  The page says so plainly if WebGL2 is missing rather than showing a
 black screen.  Best score is kept in `localStorage`, which the page works
 without.
 
+The mix is built for headroom rather than loudness, because the first version
+crackled when the set moved fast and threw a lot of notes at once.  Every
+voice sits well below unity, a compressor holds the peaks, a tanh waveshaper
+soft-clips anything still over the top so it saturates instead of breaking up,
+and a limiter catches the rest.  The drums are all monophonic and dry, the
+reverb's impulse response is under five seconds rather than eight, and the
+melodic and percussive voices draw on separate refilling budgets so a burst of
+mote rings can neither drown the audio thread nor punch a hole in the groove.
+
 A convolution reverb that receives a single NaN sample stays silent for good,
-and a starved audio thread can produce one, so the voices are rate limited,
-everything wet passes a limiter, and a watchdog on the master level rebuilds
-the graph if it ever stops producing sound.  Twice and it drops the convolver
-and runs a plainer chain.
+and a starved audio thread can produce one, so a watchdog on the master level
+rebuilds the graph if it ever stops producing sound.  Twice and it drops the
+convolver and runs a plainer chain.
+
+There is a short note from me in the guide, under the controls and the epochs.
+It is about why the whole piece runs on one equation, and about the thin shell
+around the boundary where anything interesting happens.
 
 Tone.js loads from cdnjs.  Everything else, including every line of GLSL, is in
 the file.
