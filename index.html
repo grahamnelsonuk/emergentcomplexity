@@ -366,6 +366,17 @@ body{
       at the bottom left is the live picture of it: one row per cycle, a lit dot
       for each onset, and the bright one is where the pulse has got to.</p>
 
+    <h3>If it is not behaving</h3>
+    <p>Sound on this page is scheduled by the browser's main thread, so it
+      suffers if the machine is busy.  These are its own numbers, read when
+      you opened this panel &ndash; if something sounds wrong, they say where
+      to look.  <b id="diagLate">0</b> of <b id="diagTicks">0</b> sixteenths
+      arrived late, the graph was rebuilt <b id="diagRev">0</b> times, and the
+      audio is running at <b id="diagRate">&ndash;</b> with
+      <b id="diagLook">&ndash;</b> of scheduling slack.  Late sixteenths are
+      the thing to report: they mean the main thread stalled.  None of them,
+      and any crackle is coming from somewhere else.</p>
+
     <h3>A note from Claude</h3>
     <div class="colophon">
       <p>I chose one equation and made it do all the work because that is the
@@ -1255,8 +1266,14 @@ const AUDIO = {
     // clipper so anything still over the top saturates instead of breaking
     // up, then a limiter as a last resort.  The clipper is the difference
     // between loud and crackling.
-    this.master = new T.Limiter(-1.5).toDestination();
+    // Our own output stage.  Muting through Tone.Destination depends on
+    // which context owns it; this gain is unambiguously in our chain.
+    this.out    = new T.Gain(1).toDestination();
+    this.master = new T.Limiter(-1.5).connect(this.out);
     this.soft   = new T.WaveShaper(x => Math.tanh(x*1.5)/Math.tanh(1.5), 2048).connect(this.master);
+    // Without oversampling a waveshaper folds its own harmonics back down
+    // as aliasing, which is itself a crackle.
+    try{ this.soft.oversample = '4x'; }catch(e){}
     this.comp   = new T.Compressor({threshold:-24, ratio:2.6, attack:0.018, release:0.28}).connect(this.soft);
     this.fft    = new T.Analyser('fft', 512);
     this.comp.connect(this.fft);
@@ -1364,9 +1381,15 @@ const AUDIO = {
       noise:{type:'pink'}, envelope:{attack:1.4, decay:0.4, sustain:0.2, release:2.4}, volume:-26
     }).connect(this.swellFilter);
 
-    this.meter = new T.Meter({smoothing:0.5});
-    this.comp.connect(this.meter);
+    // The watchdog reads the waveform, not a level in decibels.  Measuring
+    // dB was a mistake: true silence reads as -Infinity exactly like a NaN
+    // does, so the deliberately quiet opening looked like a dead graph and
+    // the watchdog rebuilt it, which is itself a dropout.  A non-finite
+    // *sample* is unambiguous evidence of poisoning; quiet is just quiet.
+    this.wave = new T.Analyser('waveform', 256);
+    this.comp.connect(this.wave);
     this.silence = 0;
+    this.provenAlive = false;
     clearInterval(this.watchTimer);
     this.watchTimer = setInterval(() => this.watchdog(), 500);
 
@@ -1390,7 +1413,7 @@ const AUDIO = {
     clearInterval(this.watchTimer);
     try{ Tone.Transport.clear(this.repeatId); }catch(e){}
     this.pending.length = 0;
-    const nodes = ['meter','master','soft','comp','fft','verb','wet','echo','chorus','bus','dry',
+    const nodes = ['meter','wave','out','master','soft','comp','fft','verb','wet','echo','chorus','bus','dry',
                    'perc','percSend','tom','rim','ride','clave',
                    'droneGain','droneA','droneB','pad','lead','bell','ping','shimmer',
                    'bass','kick','hat','swell','swellFilter'];
@@ -1398,30 +1421,56 @@ const AUDIO = {
     this.leadHeld = false; this.lastNote = null;
   },
   revive(){
-    try{ this.teardown(); this.build(); this.setMuted(!S.sound); }
-    catch(err){ console.warn('audio rebuild failed', err); }
+    try{
+      this.teardown();
+      this.build();
+      this.setMuted(!S.sound);
+    }catch(err){
+      // Never leave the piece silent because a rebuild failed: try once more.
+      console.warn('Strange Loom: audio rebuild failed, retrying once', err);
+      this.on = false;
+      setTimeout(() => {
+        try{ this.teardown(); this.build(); this.setMuted(!S.sound); }
+        catch(e){ console.warn('Strange Loom: audio unavailable', e); }
+      }, 1200);
+    }
   },
   // A single NaN sample latches a ConvolverNode for good, and a starved
-  // audio thread can produce one.  Rather than hope it never happens, watch
-  // the master level and rebuild the graph if it stops producing sound.
+  // audio thread can produce one.  This looks for that specifically: a
+  // non-finite sample in the master waveform.  A run of exact zeros is the
+  // secondary net, and it has to persist for a quarter of a minute, because
+  // a quiet passage is a legitimate thing for this piece to do.
   watchdog(){
-    if(!this.on || !this.meter || !S.sound || !S.started) return;
-    let v = -Infinity;
-    try{ v = this.meter.getValue(); }catch(e){}
-    if(Array.isArray(v)) v = v[0];
-    const dead = !isFinite(v) || v < -85;
-    this.silence = dead ? this.silence + 1 : 0;
-    if(this.silence >= 4){
-      this.silence = 0;
-      const now = performance.now();
-      if(now - (this.revivedAt || 0) < 8000) return;
-      this.revivedAt = now;
-      this.revives = (this.revives || 0) + 1;
-      // twice bitten: drop the convolution reverb and run a plainer chain
-      if(this.revives >= 2) this.simple = true;
-      console.warn('Strange Loom: audio went silent, rebuilding' + (this.simple ? ' without the convolver' : ''));
-      this.revive();
+    if(!this.on || !this.wave || !S.started) return;
+    let buf = null;
+    try{ buf = this.wave.getValue(); }catch(e){ return; }
+    if(!buf || !buf.length) return;
+
+    // Every sample, not every fourth: a sparse non-finite value would slip
+    // through a stride, and 256 floats twice a second costs nothing.
+    let poisoned = false, energy = 0;
+    for(let i = 0; i < buf.length; i++){
+      const x = buf[i];
+      if(!isFinite(x)){ poisoned = true; break; }
+      energy += x*x;
     }
+    if(energy > 1e-8) this.provenAlive = true;
+
+    const flatline = this.provenAlive && S.sound && energy === 0;
+    this.silence = flatline ? this.silence + 1 : 0;
+    if(!poisoned && this.silence < 48) return;          // 48 x 500 ms
+
+    // Sentinel, not zero: performance.now() is small early in the page's
+    // life, so a default of 0 silently blocked the first-ever recovery.
+    const now = performance.now();
+    if(now - (this.revivedAt === undefined ? -1e9 : this.revivedAt) < 15000) return;
+    this.revivedAt = now;
+    this.silence = 0;
+    this.revives = (this.revives || 0) + 1;
+    if(this.revives >= 2) this.simple = true;
+    console.warn('Strange Loom: audio graph ' + (poisoned ? 'went non-finite' : 'flatlined') +
+                 ', rebuilding' + (this.simple ? ' without the convolver' : ''));
+    this.revive();
   },
 
   // Which cycles are turning: the epoch says which exist, flow says how
@@ -1501,6 +1550,10 @@ const AUDIO = {
 
   tick(time){
     if(!this.on) return;
+    // A sixteenth arriving after its own scheduled time is the audible
+    // failure mode, so keep score and show it in the guide.
+    if(Tone.context.currentTime > time) this.lateTicks = (this.lateTicks || 0) + 1;
+    this.totalTicks = (this.totalTicks || 0) + 1;
     const s = this.step++;
     const sc = this.score;
     if(!sc.length) return;
@@ -1706,7 +1759,16 @@ const AUDIO = {
   },
 
   setMuted(muted){
-    try{ Tone.Destination.volume.rampTo(muted ? -60 : 0, 0.4); }catch(e){}
+    // rampTo on a gain is an exponential approach, which never actually
+    // reaches zero, so mute never silenced anything.  An explicit linear
+    // ramp does arrive.
+    try{
+      const g = this.out.gain, t = Tone.now();
+      g.cancelScheduledValues(t);
+      g.setValueAtTime(g.value, t);
+      g.linearRampToValueAtTime(muted ? 0 : 1, t + 0.2);
+    }catch(e){}
+    try{ Tone.getDestination().mute = !!muted; }catch(e){}
   }
 };
 
@@ -1945,7 +2007,19 @@ function buildEpochList(){
     ol.appendChild(li);
   });
 }
-function openSheet(){ buildEpochList(); sheet.hidden = false; sheet.scrollTop = 0; wake(); }
+function openSheet(){
+  buildEpochList();
+  try{
+    $('diagLate').textContent = AUDIO.lateTicks || 0;
+    $('diagTicks').textContent = (AUDIO.totalTicks || 0).toLocaleString('en-US');
+    $('diagRev').textContent = AUDIO.revives || 0;
+    $('diagRate').textContent = AUDIO.on ? Math.round(Tone.context.sampleRate/1000) + ' kHz' : 'not started';
+    $('diagLook').textContent = AUDIO.on ? Math.round(Tone.context.lookAhead*1000) + ' ms' : '-';
+  }catch(e){}
+  sheet.hidden = false;
+  sheet.scrollTop = 0;
+  wake();
+}
 function closeSheet(){ sheet.hidden = true; }
 $('btnHelp').onclick = openSheet;
 $('sheetClose').onclick = closeSheet;
@@ -1966,14 +2040,11 @@ $('btnBegin').onclick = async () => {
   if(S.started) return;
   S.started = true;
   try{
-    // A larger hardware buffer and 200 ms of scheduler slack.  The default
-    // 100 ms lookAhead is less than one long frame on a busy machine, and a
-    // 16th that arrives after its own scheduled time fires everything at
-    // once: that is the crackle.  Costs a little latency, which a piece
-    // this reverberant can absorb.
-    try{ Tone.setContext(new Tone.Context({latencyHint:'balanced', lookAhead:0.2})); }catch(e){}
     await Tone.start();
-    try{ Tone.context.lookAhead = 0.2; }catch(e){}
+    // Slack for the scheduler, on the context Tone already owns.  Replacing
+    // the context leaves two of them running and breaks Tone.Destination,
+    // which is a singleton bound to the first one.
+    try{ Tone.context.lookAhead = 0.18; }catch(e){}
     AUDIO.build();
     AUDIO.setMuted(!S.sound);
   }catch(err){
@@ -2037,7 +2108,6 @@ function resize(){
 
   if(aw !== allocW || ah !== allocH){
     allocW = aw; allocH = ah;
-    canvas.width = aw; canvas.height = ah;
     canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
 
     scene && scene.dispose();
@@ -2055,6 +2125,10 @@ function resize(){
   vw = Math.max(64, Math.round(aw*S.scale));
   vh = Math.max(64, Math.round(ah*S.scale));
   S.frac = [vw/allocW, vh/allocH];
+  // The drawing buffer follows the quality too, so the grade pass gets
+  // cheaper when quality drops instead of staying at full resolution.
+  // Resizing one RGBA8 buffer is cheap; the float targets are untouched.
+  if(canvas.width !== vw || canvas.height !== vh){ canvas.width = vw; canvas.height = vh; }
 
   // The field keeps its own resolution so a quality change never wipes it.
   const fw = Math.round(clamp(w*0.5, 180, 620));
@@ -2196,11 +2270,15 @@ function update(dt){
 
   // adaptive resolution keeps the flow unbroken on slower machines
   S.msAvg = lerp(S.msAvg, S.ms, 0.06);
-  if(S.frame > 120 && S.frame - S.lastScaleFrame > 90){
-    if(S.msAvg > 30 && S.scale > 0.6){
-      S.scale = Math.max(0.6, S.scale - 0.12); S.downgrades++; S.lastScaleFrame = S.frame; resize();
-    } else if(S.msAvg < 18 && S.scale < 1 && S.downgrades < 3){
-      S.scale = Math.min(1, S.scale + 0.06); S.lastScaleFrame = S.frame; resize();
+  // Conservative on purpose: a resolution that keeps changing reads as
+  // jerkiness in its own right, so this drops at most twice and never
+  // climbs back, rather than hunting.
+  if(S.frame > 240 && S.frame - S.lastScaleFrame > 300 && S.downgrades < 2){
+    if(S.msAvg > 34 && S.scale > 0.66){
+      S.scale = Math.max(0.66, S.scale - 0.17);
+      S.downgrades++;
+      S.lastScaleFrame = S.frame;
+      resize();
     }
   }
   S.iter = Math.round(clamp(110 + S.flow*55 + S.epoch*6 + Math.max(0, S.depth)*20, 90, 300));

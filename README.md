@@ -186,6 +186,17 @@ reverb's impulse response is under five seconds rather than eight, and the
 melodic and percussive voices draw on separate refilling budgets so a burst of
 mote rings can neither drown the audio thread nor punch a hole in the groove.
 
+One round of these fixes made things worse, and the useful clue was that the
+mute button stopped working.  I had replaced Tone's audio context to get a
+bigger hardware buffer, but `Tone.Destination` is a singleton bound to the
+*original* context, so mute was ramping a node nothing was connected to &ndash;
+and, far worse, two AudioContexts were left running and competing for the
+audio device, which crackles from the first second with no interaction at all.
+Never swap the context; set `lookAhead` on the one Tone already owns.  Mute now
+goes through an output gain in our own chain, with an explicit linear ramp,
+because `rampTo` on a gain is an exponential approach that never actually
+arrives at zero.
+
 Glitching on movement turned out to be scheduling, not levels.  Tone's
 sequencer callback runs on the main thread, and with the default 100 ms
 lookahead any main-thread stall longer than that makes a sixteenth arrive
@@ -214,9 +225,19 @@ wobbling flow cannot strobe the groove.  Late sixteenths under a hard mouse
 sweep went from three, worst case 453 ms late, to none.
 
 A convolution reverb that receives a single NaN sample stays silent for good,
-and a starved audio thread can produce one, so a watchdog on the master level
-rebuilds the graph if it ever stops producing sound.  Twice and it drops the
-convolver and runs a plainer chain.
+and a starved audio thread can produce one, so a watchdog rebuilds the graph if
+that happens.  Twice and it drops the convolver and runs a plainer chain.  It
+inspects the master waveform for a non-finite *sample*, rather than reading a
+level in decibels: true silence and a NaN both read as -Infinity on a meter, so
+a level-based test cannot tell a poisoned graph from a quiet passage, and this
+piece has quiet passages by design.  A run of exact zeros is the secondary net
+and has to persist for twenty-four seconds before it counts.
+
+The guide has a short diagnostics line: how many sixteenths arrived late, how
+many times the graph was rebuilt, the sample rate and the scheduling slack.
+Late sixteenths are the number worth reporting, because they mean the main
+thread stalled; if that count is zero and something still sounds wrong, the
+cause is elsewhere.
 
 There is a short note from me in the guide, under the controls and the epochs.
 It is about why the whole piece runs on one equation, and about the thin shell
