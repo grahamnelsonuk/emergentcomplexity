@@ -339,6 +339,7 @@ body{
       <div><kbd>W A S D</kbd><span>nudge c by hand</span></div>
       <div><kbd>R</kbd><span>back to the whole set.  Q and E zoom out and in</span></div>
       <div><kbd>H &nbsp; M &nbsp; G</kbd><span>hide the panel, mute, hand the seed back to drift</span></div>
+      <div><kbd>[ &nbsp; ] &nbsp; \</kbd><span>take out the drone, the drums, or the reverb and delay &ndash; one at a time, to find where a problem is coming from</span></div>
     </div>
 
     <h3>The seven epochs</h3>
@@ -374,8 +375,14 @@ body{
       arrived late, the graph was rebuilt <b id="diagRev">0</b> times, and the
       audio is running at <b id="diagRate">&ndash;</b> with
       <b id="diagLook">&ndash;</b> of scheduling slack.  Late sixteenths are
-      the thing to report: they mean the main thread stalled.  None of them,
-      and any crackle is coming from somewhere else.</p>
+      the thing to report: they mean the main thread stalled.</p>
+    <p>If that count is zero and something still sounds wrong, the cause is in
+      the signal rather than the timing.  Everything passes a 38 Hz high-pass,
+      because content below that cannot be reproduced by a small speaker
+      &ndash; the driver reaches its excursion limit and rattles, and the
+      rattle is heard as crackle.  Press <b>[</b>, <b>]</b> and <b>\</b> to
+      take out the drone, the drums and the wet effects one at a time:
+      whichever one silences the problem is the one at fault.</p>
 
     <h3>A note from Claude</h3>
     <div class="colophon">
@@ -1238,6 +1245,9 @@ function pushImpulseUV(u, v, radius, strength, hue){
 
 /* ═══════════════════════════ 6 · audio ═════════════════════════════ */
 
+// Output level, kept below unity so transients have somewhere to go.
+const OUT_LEVEL = 0.82;
+
 // A fixed bank of monophonic voices, cycled round-robin.  Nothing is
 // created or disposed once the piece is running.
 function voicePool(make, n){
@@ -1268,35 +1278,41 @@ const AUDIO = {
     // between loud and crackling.
     // Our own output stage.  Muting through Tone.Destination depends on
     // which context owns it; this gain is unambiguously in our chain.
-    this.out    = new T.Gain(1).toDestination();
+    this.out    = new T.Gain(OUT_LEVEL).toDestination();
     this.master = new T.Limiter(-1.5).connect(this.out);
     this.soft   = new T.WaveShaper(x => Math.tanh(x*1.5)/Math.tanh(1.5), 2048).connect(this.master);
     // Without oversampling a waveshaper folds its own harmonics back down
     // as aliasing, which is itself a crackle.
     try{ this.soft.oversample = '4x'; }catch(e){}
-    this.comp   = new T.Compressor({threshold:-24, ratio:2.6, attack:0.018, release:0.28}).connect(this.soft);
+    this.comp   = new T.Compressor({threshold:-24, ratio:2.6, attack:0.025, release:0.28}).connect(this.soft);
+    // Everything passes a 38 Hz high-pass first.  Content below that cannot
+    // be reproduced by a laptop speaker: the driver hits its excursion limit
+    // and rattles, which is heard as crackle, and it eats headroom on the way.
+    this.hp     = new T.Filter({type:'highpass', frequency:38, Q:0.5, rolloff:-24}).connect(this.comp);
     this.fft    = new T.Analyser('fft', 512);
     this.comp.connect(this.fft);
 
     // An eight-second convolution was the most expensive node in the graph.
     this.verb   = this.simple
-      ? new T.Gain(0.85).connect(this.comp)
-      : new T.Reverb({decay:4.5, preDelay:0.03, wet:EPOCHS[S.epoch].verb}).connect(this.comp);
+      ? new T.Gain(0.85).connect(this.hp)
+      : new T.Reverb({decay:4.5, preDelay:0.03, wet:EPOCHS[S.epoch].verb}).connect(this.hp);
     // A NaN or a runaway peak reaching a ConvolverNode silences it for good,
     // so everything wet passes a limiter first.
     this.wet    = new T.Limiter(-3).connect(this.verb);
     this.echo   = new T.PingPongDelay({delayTime:EPOCHS[S.epoch].delay, feedback:0.26, wet:0.24}).connect(this.wet);
     this.chorus = new T.Chorus({frequency:0.35, delayTime:4.5, depth:0.6, wet:0.35}).start().connect(this.echo);
-    this.bus    = new T.Filter({type:'lowpass', frequency:900, Q:0.9, rolloff:-12}).connect(this.chorus);
-    this.dry    = new T.Gain(0.9).connect(this.comp);
+    this.bus    = new T.Filter({type:'lowpass', frequency:1600, Q:0.9, rolloff:-12}).connect(this.chorus);
+    this.dry    = new T.Gain(0.9).connect(this.hp);
 
     // The bed is two free-running oscillators behind a gain, not an envelope,
     // so it can never decay away and leave the piece silent.
-    this.droneGain = new T.Gain(0).connect(new T.Filter({type:'lowpass', frequency:460, Q:0.7}).connect(this.bus));
-    this.droneA = new T.FatOscillator({type:'sawtooth', count:3, spread:24, volume:-23}).connect(this.droneGain);
-    this.droneB = new T.Oscillator({type:'sine', volume:-15}).connect(this.droneGain);
+    this.droneGain = new T.Gain(0).connect(new T.Filter({type:'lowpass', frequency:1100, Q:0.7}).connect(this.bus));
+    this.droneA = new T.FatOscillator({type:'sawtooth', count:3, spread:24, volume:-25}).connect(this.droneGain);
+    // was a sine an octave below the root, which on the opening chord meant
+    // 27.5 Hz: inaudible, and the loudest thing in the mix
+    this.droneB = new T.Oscillator({type:'triangle', volume:-21}).connect(this.droneGain);
     this.droneA.start(); this.droneB.start();
-    this.droneGain.gain.rampTo(0.5, 4);
+    this.droneGain.gain.rampTo(0.4, 4);
 
     // Tone's PolySynth allocates voices on demand and collects idle ones,
     // so a bursty part rebuilds nodes mid-performance and clicks.  These are
@@ -1304,7 +1320,7 @@ const AUDIO = {
     this.pad = voicePool(() => new T.AMSynth({
       harmonicity:2.2, oscillator:{type:'sine'}, modulation:{type:'triangle'},
       envelope:{attack:1.6, decay:1.6, sustain:0.6, release:3.2},
-      modulationEnvelope:{attack:2.2, decay:1, sustain:0.5, release:2.8}, volume:-21
+      modulationEnvelope:{attack:2.2, decay:1, sustain:0.5, release:2.8}, volume:-17
     }).connect(this.bus), 8);
 
     // Rings get their own short voice.  Feeding them to the pad was what
@@ -1313,30 +1329,30 @@ const AUDIO = {
       harmonicity:2.0, modulationIndex:4,
       envelope:{attack:0.005, decay:0.28, sustain:0.06, release:0.7},
       modulationEnvelope:{attack:0.01, decay:0.2, sustain:0.0, release:0.4},
-      volume:-19
+      volume:-16
     }).connect(this.echo), 5);
 
     this.lead = new T.MonoSynth({
       oscillator:{type:'triangle'}, portamento:0.06,
       envelope:{attack:0.03, decay:0.4, sustain:0.42, release:1.6},
       filterEnvelope:{attack:0.05, decay:0.5, sustain:0.4, release:1.8, baseFrequency:260, octaves:3.4},
-      volume:-23
+      volume:-19
     }).connect(this.bus);
     this.leadGain = null;
 
     // resonance was high enough for the comb filter to self-oscillate when
     // a long chain retriggered it many times a second
-    this.bell = new T.PluckSynth({attackNoise:1.1, dampening:3600, resonance:0.84, volume:-14})
+    this.bell = new T.PluckSynth({attackNoise:1.1, dampening:3600, resonance:0.84, volume:-13})
       .connect(new T.Limiter(-7).connect(this.echo));
     this.shimmer = voicePool(() => new T.FMSynth({
       harmonicity:3.01, modulationIndex:6,
       envelope:{attack:0.6, decay:1.2, sustain:0.15, release:2.4},
-      volume:-30
+      volume:-27
     }).connect(this.wet), 3);
 
     this.bass = new T.FMSynth({
       harmonicity:1, modulationIndex:2.5, oscillator:{type:'sine'},
-      envelope:{attack:0.02, decay:0.5, sustain:0.45, release:1.4}, volume:-14
+      envelope:{attack:0.02, decay:0.5, sustain:0.45, release:1.4}, volume:-16
     }).connect(this.dry);
 
     // The drum bench.  All monophonic and all dry, with a small send on the
@@ -1413,7 +1429,7 @@ const AUDIO = {
     clearInterval(this.watchTimer);
     try{ Tone.Transport.clear(this.repeatId); }catch(e){}
     this.pending.length = 0;
-    const nodes = ['meter','wave','out','master','soft','comp','fft','verb','wet','echo','chorus','bus','dry',
+    const nodes = ['meter','wave','out','master','soft','comp','hp','fft','verb','wet','echo','chorus','bus','dry',
                    'perc','percSend','tom','rim','ride','clave',
                    'droneGain','droneA','droneB','pad','lead','bell','ping','shimmer',
                    'bass','kick','hat','swell','swellFilter'];
@@ -1499,7 +1515,7 @@ const AUDIO = {
       switch(voice){
         case 'shaker': this.hat.triggerAttackRelease('64n', t, v*0.6); break;
         case 'tom':    this.tom.triggerAttackRelease(this.hz(root - 5 + (Math.random() < 0.34 ? 7 : 0)), '16n', t, v*0.85); break;
-        case 'kick':   this.kick.triggerAttackRelease(this.hz(root - 24), '8n', t, v); break;
+        case 'kick':   this.kick.triggerAttackRelease(this.hz(root - 12), '8n', t, v); break;
         case 'rim':    this.rim.triggerAttackRelease('64n', t, v*0.85); break;
         case 'ride':   this.ride.triggerAttackRelease(this.hz(root + 19), '16n', t, v*0.7); break;
         case 'clave':  this.clave.triggerAttackRelease(this.hz(root + 24), '32n', t, v*0.8); break;
@@ -1539,7 +1555,7 @@ const AUDIO = {
       try{
         const root = this.hz(TONIC[S.epoch] - 12);
         this.droneA.frequency.rampTo(root, 3);
-        this.droneB.frequency.rampTo(root/2, 3);
+        this.droneB.frequency.rampTo(root*2, 3);
         this.lead.oscillator.type = E.lead;
         this.echo.delayTime.rampTo(Tone.Time(E.delay).toSeconds(), 2);
         if(this.verb.wet) this.verb.wet.rampTo(E.verb, 4);
@@ -1622,7 +1638,7 @@ const AUDIO = {
     }
     if(s % 64 === 0 && this.droneA){
       const root = this.hz(TONIC[S.epoch] - 12);
-      try{ this.droneA.frequency.rampTo(root, 4, time); this.droneB.frequency.rampTo(root/2, 4, time); }catch(e){}
+      try{ this.droneA.frequency.rampTo(root, 4, time); this.droneB.frequency.rampTo(root*2, 4, time); }catch(e){}
     }
   },
 
@@ -1683,7 +1699,7 @@ const AUDIO = {
       this.bus.frequency.cancelScheduledValues(now);
       this.bus.frequency.setValueAtTime(Math.max(this.bus.frequency.value, 120), now);
       this.bus.frequency.exponentialRampToValueAtTime(inward ? 7200 : 600, now + 0.55);
-      this.bus.frequency.exponentialRampToValueAtTime(700 + S.flow*3600, now + 2.4);
+      this.bus.frequency.exponentialRampToValueAtTime(1400 + S.flow*5200, now + 2.4);
     }catch(e){}
     try{
       this.swellFilter.frequency.cancelScheduledValues(now);
@@ -1724,7 +1740,7 @@ const AUDIO = {
       this.bus.frequency.cancelScheduledValues(now);
       this.bus.frequency.setValueAtTime(this.bus.frequency.value, now);
       this.bus.frequency.exponentialRampToValueAtTime(9000, now + 0.5);
-      this.bus.frequency.exponentialRampToValueAtTime(900 + S.flow*3200, now + 2.6);
+      this.bus.frequency.exponentialRampToValueAtTime(1500 + S.flow*4800, now + 2.6);
     }catch(e){}
     this.riser(1.5);
   },
@@ -1734,12 +1750,13 @@ const AUDIO = {
     // Automating Transport BPM continuously upsets its scheduler, so this
     // runs rarely and with a long ramp.
     try{
-      if(S.dive < 0.05) this.bus.frequency.rampTo(700 + S.flow*3600 + S.audio.level*700, 1.2);
-      this.echo.wet.rampTo(0.18 + S.flow*0.22, 2);
+      const off = this.off || {};
+      if(S.dive < 0.05) this.bus.frequency.rampTo(1400 + S.flow*5200 + S.audio.level*900, 1.2);
+      if(!off.wet) this.echo.wet.rampTo(0.18 + S.flow*0.22, 2);
       const bpm = EPOCHS[S.epoch].bpm + Math.round(S.flow*10);
       if(Math.abs(Tone.Transport.bpm.value - bpm) > 2) Tone.Transport.bpm.rampTo(bpm, 6);
       if(Tone.context.state !== 'running') Tone.context.resume();
-      this.droneGain.gain.rampTo(0.42 + S.flow*0.16, 2);
+      if(!off.drone) this.droneGain.gain.rampTo(0.34 + S.flow*0.14, 2);
     }catch(e){}
   },
 
@@ -1758,6 +1775,27 @@ const AUDIO = {
     S.audio.level = (S.audio.bass + S.audio.mid + S.audio.high)/3;
   },
 
+  // Three groups that can be taken out independently.  If anything still
+  // sounds wrong, switching these off one at a time says which part of the
+  // graph it comes from, which is otherwise guesswork for anyone who cannot
+  // hear the output.
+  toggleGroup(which){
+    if(!this.on) return null;
+    this.off = this.off || {};
+    this.off[which] = !this.off[which];
+    const o = this.off[which];
+    try{
+      if(which === 'drone') this.droneGain.gain.rampTo(o ? 0 : (0.34 + S.flow*0.14), 0.3);
+      if(which === 'perc')  this.perc.gain.rampTo(o ? 0 : 0.95, 0.3);
+      if(which === 'wet'){
+        this.echo.wet.rampTo(o ? 0 : 0.24, 0.3);
+        this.chorus.wet.rampTo(o ? 0 : 0.35, 0.3);
+        if(this.verb.wet) this.verb.wet.rampTo(o ? 0 : EPOCHS[S.epoch].verb, 0.3);
+      }
+    }catch(e){}
+    return o;
+  },
+
   setMuted(muted){
     // rampTo on a gain is an exponential approach, which never actually
     // reaches zero, so mute never silenced anything.  An explicit linear
@@ -1766,7 +1804,7 @@ const AUDIO = {
       const g = this.out.gain, t = Tone.now();
       g.cancelScheduledValues(t);
       g.setValueAtTime(g.value, t);
-      g.linearRampToValueAtTime(muted ? 0 : 1, t + 0.2);
+      g.linearRampToValueAtTime(muted ? 0 : OUT_LEVEL, t + 0.2);
     }catch(e){}
     try{ Tone.getDestination().mute = !!muted; }catch(e){}
   }
@@ -1949,6 +1987,13 @@ addEventListener('keydown', e => {
   if(k === ' '){ e.preventDefault(); releaseBloom(); wake(); }
   else if(k === 'h'){ toggleClean(); }
   else if(k === 'r'){ recentre(); wake(); }
+  else if(k === '[' || k === ']' || k === '\\'){
+    const group = k === '[' ? 'drone' : k === ']' ? 'perc' : 'wet';
+    const label = k === '[' ? 'drone' : k === ']' ? 'drums' : 'reverb and delay';
+    const o = AUDIO.toggleGroup(group);
+    if(o !== null) whisper(label + (o ? ' off' : ' on'), 2400);
+    wake();
+  }
   else if(k >= '1' && k <= '7'){
     const L = PULSE[+k - 1];
     if(L){

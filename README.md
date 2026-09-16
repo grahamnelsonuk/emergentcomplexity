@@ -177,6 +177,27 @@ require.  The page says so plainly if WebGL2 is missing rather than showing a
 black screen.  Best score is kept in `localStorage`, which the page works
 without.
 
+The crackle that survived every scheduling fix was not timing at all, and the
+page's own diagnostics said so: zero late sixteenths, zero rebuilds.  A
+spectrum measurement found it.  The two loudest bands in the whole mix were
+20&ndash;40 Hz and 40&ndash;80 Hz, sitting fifteen decibels above everything
+over 200 Hz &ndash; the drone's lower voice was a sine an octave below the
+root, which on the opening chord is 27.5 Hz, and the kick was at 31 Hz.  No
+small speaker can reproduce either: the driver reaches its excursion limit and
+rattles, and the rattle is heard as crackle.  It was also the reason nothing
+about scheduling helped and why it started the moment the page did.
+
+The drone's lower voice is now a triangle an octave *above* the root, the kick
+is an octave up at around 62 Hz, and everything passes a 38 Hz high-pass on the
+way out so nothing inaudible reaches the speakers or eats headroom.  The
+melodic bus was also being low-passed at 700 Hz whenever flow was low, which is
+what left the mix as bass and rumble with nothing in the middle; it now opens
+at 1.4 kHz.  Measured result: the 20&ndash;40 Hz band is down twenty-five
+decibels, the mids are up nine, and true peak is 0.79 with no clipped samples.
+
+The guide has keys to take out the drone, the drums and the wet effects one at
+a time, so a listener can localise a problem that I cannot hear.
+
 The mix is built for headroom rather than loudness, because the first version
 crackled when the set moved fast and threw a lot of notes at once.  Every
 voice sits well below unity, a compressor holds the peaks, a tanh waveshaper
