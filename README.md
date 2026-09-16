@@ -186,6 +186,33 @@ reverb's impulse response is under five seconds rather than eight, and the
 melodic and percussive voices draw on separate refilling budgets so a burst of
 mote rings can neither drown the audio thread nor punch a hole in the groove.
 
+Glitching on movement turned out to be scheduling, not levels.  Tone's
+sequencer callback runs on the main thread, and with the default 100 ms
+lookahead any main-thread stall longer than that makes a sixteenth arrive
+after its own scheduled time, at which point everything in it fires at once.
+Three things were causing that, all measurable:
+
+* **Reallocating render targets** took the better part of a second, and it
+  happened whenever adaptive quality nudged the render scale.  The targets are
+  now allocated once at full size and a quality change only shrinks the
+  viewport drawn into, with each pass scaling its sampling into the live
+  region.  Measured worst frame went from 690 ms to 3 ms.
+* **A high-polling mouse.**  Reporting at up to 1 kHz, every event was doing
+  steering maths and touching the DOM.  The handler now only records the
+  latest position and the frame applies it once.
+* **Notes scheduled from the render loop.**  A mote ring fired at whatever
+  `Tone.now()` happened to be, so several rings in one frame landed on the
+  same audio timestamp and retriggered monophonic voices mid-note.  Rings are
+  queued and fired from the sequencer instead, spread across the step, which
+  also locks them to the groove rather than floating over it.
+
+On top of that the context is created with `latencyHint: 'balanced'` and a
+200 ms lookahead, the voices are fixed round-robin banks rather than
+Tone's `PolySynth` (which allocates and garbage-collects voices, so a bursty
+part rebuilds nodes mid-performance), and layer gating has hysteresis so a
+wobbling flow cannot strobe the groove.  Late sixteenths under a hard mouse
+sweep went from three, worst case 453 ms late, to none.
+
 A convolution reverb that receives a single NaN sample stays silent for good,
 and a starved audio thread can produce one, so a watchdog on the master level
 rebuilds the graph if it ever stops producing sound.  Twice and it drops the
